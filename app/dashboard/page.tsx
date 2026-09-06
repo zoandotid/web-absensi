@@ -7,7 +7,7 @@ import Webcam from 'react-webcam';
 import { Button } from '@/components/ui/button';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { MapPin, Camera, LogOut, CheckCircle2, Clock, AlertCircle, RefreshCw } from 'lucide-react';
+import { MapPin, Camera, LogOut, CheckCircle2, Clock, AlertCircle, RefreshCw, ShieldCheck } from 'lucide-react';
 
 interface AttendanceRecord {
   id: string;
@@ -211,9 +211,22 @@ export default function DashboardPage() {
               Role: <span className="capitalize font-semibold text-slate-700">{user?.role}</span>
             </p>
           </div>
-          <Button onClick={handleLogout} variant="outline" className="border-red-200 text-red-600 hover:bg-red-50 gap-2">
-            <LogOut className="w-4 h-4" /> Logout
-          </Button>
+          
+          <div className="flex items-center gap-3">
+            {/* Tombol Halaman Admin (Hanya muncul jika role = admin) */}
+            {user?.role === 'admin' && (
+              <Button
+                onClick={() => router.push('/admin')}
+                className="bg-indigo-600 hover:bg-indigo-700 text-white gap-2"
+              >
+                <ShieldCheck className="w-4 h-4" /> Panel Admin
+              </Button>
+            )}
+
+            <Button onClick={handleLogout} variant="outline" className="border-red-200 text-red-600 hover:bg-red-50 gap-2">
+              <LogOut className="w-4 h-4" /> Logout
+            </Button>
+          </div>
         </div>
 
         {/* Form Absen & Preview Kamera */}
