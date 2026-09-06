@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { supabase } from '@/lib/supabase';
 import Webcam from 'react-webcam';
@@ -12,6 +12,7 @@ import { MapPin, Camera, LogOut, CheckCircle2, Clock, AlertCircle, RefreshCw, Sh
 interface AttendanceRecord {
   id: string;
   type: 'masuk' | 'pulang';
+  status: string | null;
   latitude: number | null;
   longitude: number | null;
   photo_url: string | null;
@@ -24,11 +25,18 @@ interface UserProfile {
   role: string;
 }
 
+interface SchoolSchedule {
+  work_start: string;
+  work_end: string;
+  late_tolerance_minutes: number;
+}
+
 export default function DashboardPage() {
   const router = useRouter();
   const webcamRef = useRef<Webcam>(null);
 
   const [user, setUser] = useState<UserProfile | null>(null);
+  const [schedule, setSchedule] = useState<SchoolSchedule | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [submitting, setSubmitting] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string>('');
@@ -41,38 +49,42 @@ export default function DashboardPage() {
   // Attendance History
   const [history, setHistory] = useState<AttendanceRecord[]>([]);
 
-  // 1. Ambil Data User & Cek Sesi Login
   useEffect(() => {
-    const fetchUserData = async () => {
-      setLoading(true);
-      const { data: { session } } = await supabase.auth.getSession();
-
-      if (!session) {
-        router.push('/login');
-        return;
-      }
-
-      // Fetch Profile
-      const { data: profile } = await supabase
-        .from('profiles')
-        .select('*')
-        .eq('id', session.user.id)
-        .single();
-
-      if (profile) {
-        setUser(profile);
-      }
-
-      // Fetch Attendance History
-      fetchHistory(session.user.id);
-      setLoading(false);
-    };
-
-    fetchUserData();
+    fetchInitialData();
     getLocation();
   }, [router]);
 
-  // 2. Dapatkan Lokasi GPS
+  const fetchInitialData = async () => {
+    setLoading(true);
+    const { data: { session } } = await supabase.auth.getSession();
+
+    if (!session) {
+      router.push('/login');
+      return;
+    }
+
+    // 1. Fetch Profile User
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('*')
+      .eq('id', session.user.id)
+      .single();
+
+    if (profile) setUser(profile);
+
+    // 2. Fetch Pengaturan Jam Sekolah Al Ihsan
+    const { data: settings } = await supabase
+      .from('school_settings')
+      .select('*')
+      .single();
+
+    if (settings) setSchedule(settings);
+
+    // 3. Fetch History Absensi
+    fetchHistory(session.user.id);
+    setLoading(false);
+  };
+
   const getLocation = () => {
     setLocationError('');
     if ('geolocation' in navigator) {
@@ -83,9 +95,7 @@ export default function DashboardPage() {
             lng: position.coords.longitude,
           });
         },
-        (error) => {
-          setLocationError('Gagal mengambil lokasi. Pastikan GPS/Izin Lokasi aktif.');
-        },
+        () => setLocationError('Gagal mengambil lokasi. Pastikan GPS/Izin Lokasi aktif.'),
         { enableHighAccuracy: true }
       );
     } else {
@@ -93,7 +103,6 @@ export default function DashboardPage() {
     }
   };
 
-  // 3. Ambil Riwayat Absensi
   const fetchHistory = async (userId: string) => {
     const { data } = await supabase
       .from('attendances')
@@ -101,12 +110,9 @@ export default function DashboardPage() {
       .eq('user_id', userId)
       .order('created_at', { ascending: false });
 
-    if (data) {
-      setHistory(data as AttendanceRecord[]);
-    }
+    if (data) setHistory(data as AttendanceRecord[]);
   };
 
-  // 4. Helper Konversi Base64 Image ke Blob untuk Upload Supabase Storage
   const base64ToBlob = (base64String: string) => {
     const byteString = atob(base64String.split(',')[1]);
     const mimeString = base64String.split(',')[0].split(':')[1].split(';')[0];
@@ -118,7 +124,21 @@ export default function DashboardPage() {
     return new Blob([ab], { type: mimeString });
   };
 
-  // 5. Eksekusi Absen (Masuk / Pulang)
+  // Fungsi Kalkulasi Status Keterlambatan
+  const calculateAttendanceStatus = (type: 'masuk' | 'pulang'): string => {
+    if (type === 'pulang') return 'pulang';
+    if (!schedule) return 'tepat_waktu';
+
+    const now = new Date();
+    const [startHour, startMinute] = schedule.work_start.split(':').map(Number);
+
+    // Tentukan Batas Toleransi Jam Masuk
+    const deadline = new Date();
+    deadline.setHours(startHour, startMinute + schedule.late_tolerance_minutes, 0, 0);
+
+    return now > deadline ? 'terlambat' : 'tepat_waktu';
+  };
+
   const handleAttendance = async (type: 'masuk' | 'pulang') => {
     setErrorMsg('');
     setSuccessMsg('');
@@ -145,7 +165,10 @@ export default function DashboardPage() {
       const { data: { session } } = await supabase.auth.getSession();
       if (!session) throw new Error('Sesi tidak ditemukan, silakan login ulang.');
 
-      // a. Upload Foto Ke Supabase Storage
+      // Hitung Status Keterlambatan
+      const attendanceStatus = calculateAttendanceStatus(type);
+
+      // Upload Foto Bukti
       const imageBlob = base64ToBlob(imageSrc);
       const fileName = `${session.user.id}/${Date.now()}-${type}.jpg`;
 
@@ -155,27 +178,26 @@ export default function DashboardPage() {
 
       if (uploadError) throw uploadError;
 
-      // b. Ambil Public URL Foto
       const { data: publicUrlData } = supabase.storage
         .from('absensi-photos')
         .getPublicUrl(fileName);
 
-      const photoUrl = publicUrlData.publicUrl;
-
-      // c. Simpan Record ke Tabel Attendances
+      // Simpan ke Database
       const { error: dbError } = await supabase.from('attendances').insert([
         {
           user_id: session.user.id,
           type,
+          status: attendanceStatus,
           latitude: coords.lat,
           longitude: coords.lng,
-          photo_url: photoUrl,
+          photo_url: publicUrlData.publicUrl,
         },
       ]);
 
       if (dbError) throw dbError;
 
-      setSuccessMsg(`Absen ${type} berhasil dicatat!`);
+      const statusText = attendanceStatus === 'terlambat' ? ' (Terlambat)' : '';
+      setSuccessMsg(`Absen ${type} berhasil dicatat${statusText}!`);
       fetchHistory(session.user.id);
     } catch (err: any) {
       setErrorMsg(err.message || 'Terjadi kesalahan saat memproses absensi.');
@@ -184,7 +206,6 @@ export default function DashboardPage() {
     }
   };
 
-  // 6. Handle Logout
   const handleLogout = async () => {
     await supabase.auth.signOut();
     router.push('/login');
@@ -193,7 +214,7 @@ export default function DashboardPage() {
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-slate-50">
-        <p className="text-slate-600 font-medium">Memuat Dashboard...</p>
+        <p className="text-slate-600 font-medium">Memuat Dashboard Presensi Al Ihsan...</p>
       </div>
     );
   }
@@ -205,20 +226,16 @@ export default function DashboardPage() {
         <div className="flex flex-col md:flex-row md:items-center justify-between bg-white p-6 rounded-xl border border-slate-200 shadow-sm gap-4">
           <div>
             <h1 className="text-2xl font-bold text-slate-800">
-              Selamat Datang, {user?.full_name || 'Pengguna'}!
+              Selamat Datang, {user?.full_name || 'Guru/Karyawan'}!
             </h1>
             <p className="text-slate-500 text-sm">
-              Role: <span className="capitalize font-semibold text-slate-700">{user?.role}</span>
+              Sekolah Al Ihsan — Jam Kerja: <span className="font-semibold text-slate-700">{schedule?.work_start.slice(0, 5)} - {schedule?.work_end.slice(0, 5)} WIB</span> (Toleransi: {schedule?.late_tolerance_minutes} mnt)
             </p>
           </div>
           
           <div className="flex items-center gap-3">
-            {/* Tombol Halaman Admin (Hanya muncul jika role = admin) */}
             {user?.role === 'admin' && (
-              <Button
-                onClick={() => router.push('/admin')}
-                className="bg-indigo-600 hover:bg-indigo-700 text-white gap-2"
-              >
+              <Button onClick={() => router.push('/admin')} className="bg-indigo-600 hover:bg-indigo-700 text-white gap-2">
                 <ShieldCheck className="w-4 h-4" /> Panel Admin
               </Button>
             )}
@@ -229,14 +246,12 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        {/* Form Absen & Preview Kamera */}
+        {/* Panel Kamera & Aksi */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          {/* Panel Kamera */}
           <Card className="border-slate-200 shadow-sm">
             <CardHeader>
               <CardTitle className="text-lg flex items-center gap-2 text-slate-800">
-                <Camera className="w-5 h-5 text-indigo-600" />
-                Kamera Absensi
+                <Camera className="w-5 h-5 text-indigo-600" /> Kamera Selfie Presensi
               </CardTitle>
               <CardDescription>Posisikan wajah Anda di dalam bingkai kamera</CardDescription>
             </CardHeader>
@@ -247,14 +262,10 @@ export default function DashboardPage() {
                   ref={webcamRef}
                   screenshotFormat="image/jpeg"
                   className="w-full h-full object-cover -scale-x-100"
-                  videoConstraints={{
-                    facingMode: 'user',
-                    aspectRatio: 3 / 4,
-                  }}
+                  videoConstraints={{ facingMode: 'user', aspectRatio: 3 / 4 }}
                 />
               </div>
 
-              {/* Status Lokasi */}
               <div className="bg-slate-100 p-3 rounded-lg text-sm space-y-1">
                 <div className="flex items-center justify-between">
                   <span className="font-semibold text-slate-700 flex items-center gap-1">
@@ -265,9 +276,7 @@ export default function DashboardPage() {
                   </Button>
                 </div>
                 {coords.lat && coords.lng ? (
-                  <p className="text-slate-600 font-mono text-xs">
-                    Lat: {coords.lat.toFixed(6)}, Lng: {coords.lng.toFixed(6)}
-                  </p>
+                  <p className="text-slate-600 font-mono text-xs">Lat: {coords.lat.toFixed(6)}, Lng: {coords.lng.toFixed(6)}</p>
                 ) : (
                   <p className="text-red-500 text-xs">{locationError || 'Mencari lokasi...'}</p>
                 )}
@@ -275,12 +284,10 @@ export default function DashboardPage() {
             </CardContent>
           </Card>
 
-          {/* Panel Aksi & Status */}
           <Card className="border-slate-200 shadow-sm flex flex-col justify-between">
             <CardHeader>
               <CardTitle className="text-lg flex items-center gap-2 text-slate-800">
-                <Clock className="w-5 h-5 text-emerald-600" />
-                Presensi Hari Ini
+                <Clock className="w-5 h-5 text-emerald-600" /> Presensi Hari Ini
               </CardTitle>
               <CardDescription>Pilih jenis absensi yang ingin dicatat</CardDescription>
             </CardHeader>
@@ -322,11 +329,10 @@ export default function DashboardPage() {
           </Card>
         </div>
 
-        {/* Tabel Riwayat Absensi */}
+        {/* Tabel Riwayat */}
         <Card className="border-slate-200 shadow-sm">
           <CardHeader>
             <CardTitle className="text-lg text-slate-800">Riwayat Kehadiran</CardTitle>
-            <CardDescription>Catatan kehadiran terkini Anda</CardDescription>
           </CardHeader>
           <CardContent>
             {history.length === 0 ? (
@@ -338,6 +344,7 @@ export default function DashboardPage() {
                     <TableRow>
                       <TableHead>Waktu</TableHead>
                       <TableHead>Tipe</TableHead>
+                      <TableHead>Status</TableHead>
                       <TableHead>Foto Bukti</TableHead>
                       <TableHead>Koordinat</TableHead>
                     </TableRow>
@@ -346,40 +353,23 @@ export default function DashboardPage() {
                     {history.map((item) => (
                       <TableRow key={item.id}>
                         <TableCell className="font-medium text-slate-700">
-                          {new Date(item.created_at).toLocaleString('id-ID', {
-                            dateStyle: 'medium',
-                            timeStyle: 'short',
-                          })}
+                          {new Date(item.created_at).toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' })}
                         </TableCell>
+                        <TableCell className="capitalize">{item.type}</TableCell>
                         <TableCell>
-                          <span
-                            className={`px-2.5 py-1 rounded-full text-xs font-semibold capitalize ${
-                              item.type === 'masuk'
-                                ? 'bg-emerald-100 text-emerald-700'
-                                : 'bg-amber-100 text-amber-700'
-                            }`}
-                          >
-                            {item.type}
+                          <span className={`px-2.5 py-1 rounded-full text-xs font-semibold capitalize ${
+                            item.status === 'terlambat' ? 'bg-red-100 text-red-700' : 'bg-emerald-100 text-emerald-700'
+                          }`}>
+                            {item.status === 'terlambat' ? 'Terlambat' : 'Tepat Waktu'}
                           </span>
                         </TableCell>
                         <TableCell>
                           {item.photo_url ? (
-                            <a
-                              href={item.photo_url}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="text-indigo-600 hover:underline text-sm font-medium"
-                            >
-                              Lihat Foto
-                            </a>
-                          ) : (
-                            <span className="text-slate-400 text-xs">-</span>
-                          )}
+                            <a href={item.photo_url} target="_blank" rel="noreferrer" className="text-indigo-600 hover:underline text-sm font-medium">Lihat Foto</a>
+                          ) : '-'}
                         </TableCell>
                         <TableCell className="font-mono text-xs text-slate-500">
-                          {item.latitude && item.longitude
-                            ? `${item.latitude.toFixed(4)}, ${item.longitude.toFixed(4)}`
-                            : '-'}
+                          {item.latitude && item.longitude ? `${item.latitude.toFixed(4)}, ${item.longitude.toFixed(4)}` : '-'}
                         </TableCell>
                       </TableRow>
                     ))}
