@@ -228,13 +228,16 @@ export default function DashboardPage() {
               <CardDescription>Posisikan wajah Anda di dalam bingkai kamera</CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
-              <div className="relative rounded-lg overflow-hidden bg-slate-900 aspect-video flex items-center justify-center">
+              <div className="relative rounded-lg overflow-hidden bg-slate-900 aspect-[3/4] max-w-sm mx-auto flex items-center justify-center">
                 <Webcam
                   audio={false}
                   ref={webcamRef}
                   screenshotFormat="image/jpeg"
-                  className="w-full h-full object-cover"
-                  videoConstraints={{ facingMode: 'user' }}
+                  className="w-full h-full object-cover -scale-x-100"
+                  videoConstraints={{
+                    facingMode: 'user',
+                    aspectRatio: 3 / 4,
+                  }}
                 />
               </div>
 
